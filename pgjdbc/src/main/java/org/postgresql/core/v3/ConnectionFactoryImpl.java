@@ -702,6 +702,29 @@ public class ConnectionFactoryImpl extends ConnectionFactory {
     pgStream.flush();
   }
 
+  private static String getAuthenticationMethodName(int authReq) {
+    switch (authReq) {
+      case AUTH_REQ_OK:
+        return "none";
+      case AUTH_REQ_PASSWORD:
+        return "password";
+      case AUTH_REQ_MD5:
+        return "md5";
+      case AUTH_REQ_GSS:
+        return "gss";
+      case AUTH_REQ_SSPI:
+        return "sspi";
+      case AUTH_REQ_SASL:
+        return "sasl";
+      case AUTH_REQ_SASL_CONTINUE:
+        return "sasl-continue";
+      case AUTH_REQ_SASL_FINAL:
+        return "sasl-final";
+      default:
+        return String.valueOf(authReq);
+    }
+  }
+
   private static void doAuthentication(PGStream pgStream, String host, String user, Properties info) throws IOException, SQLException {
     // Now get the response from the backend, either an error message
     // or an authentication request
@@ -713,6 +736,9 @@ public class ConnectionFactoryImpl extends ConnectionFactory {
     ScramAuthenticator scramAuthenticator = null;
     // TODO: figure out how to deal with new protocols
     int protocol = 3 << 16;
+
+    boolean saslHandshakeCompleted = false;
+    ChannelBinding channelBinding = ChannelBinding.of(info);
 
     try {
       authloop: while (true) {
@@ -758,6 +784,23 @@ public class ConnectionFactoryImpl extends ConnectionFactory {
 
             // Get the type of request
             int areq = pgStream.receiveInteger4();
+
+            if (channelBinding == ChannelBinding.REQUIRE) {
+              if (areq == AUTH_REQ_OK) {
+                if (!saslHandshakeCompleted) {
+                  throw new PSQLException(
+                      GT.tr("Channel binding is required, but server skipped authentication. "
+                          + "Channel binding is only supported with SCRAM authentication over encrypted connections."),
+                      PSQLState.CONNECTION_REJECTED);
+                }
+              } else if (areq != AUTH_REQ_SASL && areq != AUTH_REQ_SASL_CONTINUE && areq != AUTH_REQ_SASL_FINAL) {
+                throw new PSQLException(
+                      GT.tr("Channel binding is required, but server requested ''{0}'' authentication. "
+                          + "Channel binding is only supported with SCRAM authentication over encrypted connections.",
+                          getAuthenticationMethodName(areq)),
+                      PSQLState.CONNECTION_REJECTED);
+              }
+            }
 
             // Process the request.
             switch (areq) {
@@ -890,7 +933,7 @@ public class ConnectionFactoryImpl extends ConnectionFactory {
                 break;
 
               case AUTH_REQ_SASL:
-                scramAuthenticator = AuthenticationPluginManager.withPassword(AuthenticationRequestType.SASL, info, password -> {
+                scramAuthenticator = AuthenticationPluginManager.<ScramAuthenticator>withPassword(AuthenticationRequestType.SASL, info, password -> {
                   if (password == null) {
                     throw new PSQLException(
                         GT.tr(
@@ -903,7 +946,7 @@ public class ConnectionFactoryImpl extends ConnectionFactory {
                             "The server requested SCRAM-based authentication, but the password is an empty string."),
                         PSQLState.CONNECTION_REJECTED);
                   }
-                  return new ScramAuthenticator(password, pgStream, info);
+                  return new ScramAuthenticator(password, pgStream, channelBinding);
                 });
                 scramAuthenticator.handleAuthenticationSASL();
                 break;
@@ -914,6 +957,7 @@ public class ConnectionFactoryImpl extends ConnectionFactory {
 
               case AUTH_REQ_SASL_FINAL:
                 castNonNull(scramAuthenticator).handleAuthenticationSASLFinal(msgLen - 4 - 4);
+                saslHandshakeCompleted = true;
                 break;
 
               case AUTH_REQ_OK:

@@ -318,8 +318,6 @@ public class QueryExecutorImpl extends QueryExecutorBase {
     switch (getPreferQueryMode()) {
       case SIMPLE:
         return flags | QUERY_EXECUTE_AS_SIMPLE;
-      case EXTENDED:
-        return flags & ~QUERY_EXECUTE_AS_SIMPLE;
       default:
         return flags;
     }
@@ -2479,6 +2477,8 @@ public class QueryExecutorImpl extends QueryExecutorBase {
             SimpleQuery currentQuery = describeData.query;
             currentQuery.setFields(fields);
 
+            // We do not need creating resultset here, however, it is actually used
+            // in PgPreparedStatement#getMetaData()
             handler.handleResultRows(currentQuery, fields, tuples, null);
             tuples = null;
           }
